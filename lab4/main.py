@@ -1,0 +1,164 @@
+import socketserver
+import socket
+import threading
+import os
+from time import sleep
+import select
+
+banList = [b'bing.com']
+
+
+class MyThread(threading.Thread):
+    def __init__(self, request, dest_host, dest_port, data):
+        # 初始化函数
+        threading.Thread.__init__(self)
+        self.request = request
+        self.dest_host = dest_host
+        self.dest_port = dest_port
+        self.data = data
+
+    def run(self):
+        # 创建一个socket连接 (SOCK_STREAM means a TCP socket)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            # 连接到服务器
+            sock.connect((self.dest_host, self.dest_port))
+            # 发送数据
+            sock.sendall(self.data)
+            # 从服务器获取数据
+            while True:
+                try:
+                    readable, _, _ = select.select([sock, ], [], [])
+                    if len(readable) > 0:
+                        received = sock.recv(1024)
+                        self.request.sendall(received)
+                except Exception:
+                    sock.close()
+                    break
+
+
+class MyHTTPSThread(threading.Thread):
+    def __init__(self, request, dest_host, dest_port, sock):
+        # 初始化函数
+        threading.Thread.__init__(self)
+        self.request = request
+        self.sock = sock
+        self.dest_host = dest_host
+        self.dest_port = dest_port
+
+    def run(self):
+        # 连接到服务器
+        try:
+            print("connect to", self.dest_host, self.dest_port)
+            self.sock.connect((self.dest_host, self.dest_port))
+            print("connect", self.dest_host, "completed")
+            # 发送数据
+            self.request.sendall(b"HTTP/1.1 200 Connection Established\n\n")
+            print(self.dest_host, "send completed")
+            # 从服务器端获取数据
+            while True:
+                # try:
+                readable, _, _ = select.select([self.sock, ], [], [])
+
+                if len(readable) > 0:
+                    received = self.sock.recv(1024)
+                    # print("receive:", received)
+                    self.request.sendall(received)
+            # except Exception:
+            #     self.sock.close()
+            #     self.request.close()
+            #     return
+        except Exception:
+            self.sock.close()
+            self.request.close()
+            return
+
+
+class MyTCPHandler(socketserver.BaseRequestHandler):
+
+    def ifInBanList(self, a):
+        for i in banList:
+            count = a.find(i)
+            if count > 0:
+                return True
+        return False
+
+    def handle(self):
+        self.isHttps = False
+        while True:
+            # select.select(self.request)
+            try:
+                # readable = select.select([self.request, ])
+                # if len(readable) > 0:
+                self.data = self.request.recv(1024)
+                if self.isHttps:
+                    self.sock.sendall(self.data)
+                else:
+                    lines = self.data.split(b"\n")
+                    print("======lines======")
+                    for i in range(len(lines)):
+                        print(i, lines[i])
+                    print("======lines======")
+
+                    # 分离请求行，把请求方法、请求的url等信息分开存储到对应的数组项中
+                    first_line = lines[0]
+                    first_arr = first_line.split()  # url
+                    method = first_arr[0]  # 请求方法
+                    # 打印请求的方式
+                    print(method)
+                    print("---------------------")
+                    print("url:", first_arr[1].decode())
+                    print(first_arr)
+
+                    if method == b"CONNECT":
+                        if self.ifInBanList(first_arr[1]):
+                            print('The request url is limited!')
+                            print("---------------------")
+                            self.request.close()
+                            sleep(2)
+                            os._exit()
+                        # 处理"CONNECT"请求
+                        self.isHttps = True
+                        dest_tuple = first_arr[1].split(b":")
+                        dest_host = dest_tuple[0].decode("utf-8")
+                        dest_port = int(dest_tuple[1].decode("utf-8"))
+                        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        MyHTTPSThread(self.request, dest_host, dest_port, self.sock).start()
+                    else:
+                        # 获取完整的请求url
+                        absolute_url = first_arr[1]
+                        if absolute_url.startswith(b"http://"):
+                            # 处理HTTP请求
+                            first_arr[1] = absolute_url[7:-1]
+                        elif absolute_url.startswith(b"https://"):
+                            # 处理HTTPS请求
+                            first_arr[1] = absolute_url[8:-1]
+                        print("处理：", first_arr)
+                        lines[0] = b" ".join(first_arr)
+
+                        for index, line in enumerate(lines):
+                            if line.startswith(b"Proxy-Connection"):
+                                lines[index] = line.replace(b"Proxy-Connection", b"Connection")
+                            if line.startswith(b"Host"):
+                                tmp_arr = line.split()[1].split(b":")
+                                dest_host = tmp_arr[0].decode("utf-8")
+                                if len(tmp_arr) > 1:
+                                    dest_port = int(tmp_arr[1].decode("utf-8"))
+                                else:
+                                    dest_port = 80
+                        print(dest_host, dest_port)
+                        if dest_host.find(b'tieba.baidu.com') > 0:
+                            dest_host == b'360.com'
+                            print('-----钓鱼-----')
+                        self.data = b"\n".join(lines)
+                        print(self.data)
+                        thread = MyThread(self.request, dest_host, dest_port, self.data)
+                        thread.start()
+            except Exception:
+                self.request.close()
+                return
+
+
+if __name__ == "__main__":
+    HOST, PORT = "localhost", 233
+    server = socketserver.ThreadingTCPServer((HOST, PORT), MyTCPHandler)
+    server.serve_forever()
